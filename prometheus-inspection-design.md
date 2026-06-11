@@ -415,3 +415,172 @@ class BaselineCache:
 | **Skill** | 定义分析框架、阈值体系、关联规则、报告模板 | 不写代码、不连数据库 |
 
 **核心原则**: Skill 给 AI 装了"脑子"，MCP Server 给了 AI "手和眼"。AI 利用 Skill 中的方法论，调用 MCP 工具，完成从数据采集 → 异常检测 → 根因分析 → 报告生成的全流程。
+
+
+
+20260611,建议：
+1，流程串联
+用户问题 / 定时任务
+  -> 目标解析
+  -> 生成巡检计划 InspectionPlan
+  -> 校验巡检计划
+  -> Prometheus 查询当前值
+  -> Prometheus 查询历史采样
+  -> Grafana / 配置阈值合并
+  -> 指标分析工具分级
+  -> AI 生成原因分析和建议
+  -> HTML 报告渲染
+
+2， 能力的分配建议
+Prometheus API 查询	   Python 工具	确定性、可测试、要控制超时和数据量
+Grafana 阈值查询      	Python 工具	阈值来源必须可追溯
+当前值计算	            PromQL + Python 工具	如最近 5 分钟平均值，不能让 AI 算
+历史采样查询	          Python 工具	控制时间范围、step、series 数量
+指标分析和风险分级	    Python 工具	分级标准要稳定，不应由 AI 自由判断
+HTML 报告生成	        Python 工具	模板固定，格式稳定
+PromQL 生成知识	      Skill	存常用 PromQL 样例、指标语义、注意事项
+核心指标目录	          配置文件 + Skill	工具读取配置，AI 通过 Skill 理解含义
+用户问题理解	          大模型	自然语言解析适合 AI
+原因分析和建议	        大模型	但必须基于工具输出的 evidence
+定时巡检编排	          平台流程/定时任务	不建议让 AI 临时决定查什么
+
+
+3, 关于用户问题理解
+根据用户说的 Prometheus 地址、环境、服务名，解析真实连接信息。
+比如用户：请帮我查一下 127.0.0.1 那台 Prometheus 上 Redis 是否异常
+AI 理解出：{
+  "target_hint": "127.0.0.1",
+  "domain": "redis"
+}
+
+然后调用target_resolver工具返回最基础的数据：
+{
+  "target_id": "local-dev",
+  "base_url": "http://127.0.0.1:9090",
+  "env": "dev",
+  "domain": "redis",
+  "job_filters": ["redis"],
+  "default_range_hours": 24,
+  "default_step_seconds": 60,
+  "grafana_datasource_uid": "prom-local",
+  "auth": {
+    "type": "none"
+  }
+}
+
+然后prometheus查询工具只使用这个target_resolver返回的样式结果，不接受ai编写出来的任何其他输出或者地址
+target json，类似：
+{
+  "targets": [
+    {
+      "id": "local-dev",
+      "name": "Local Dev Prometheus",
+      "aliases": ["127.0.0.1", "localhost", "本地", "dev-prometheus"],
+      "env": "dev",
+      "base_url": "http://127.0.0.1:9090",
+      "grafana_datasource_uid": "prom-local",
+      "auth": {
+        "type": "none"
+      },
+      "defaults": {
+        "range_hours": 24,
+        "step_seconds": 60
+      },
+      "domains": {
+        "host": {
+          "job_patterns": ["node", "node-exporter"]
+        },
+        "redis": {
+          "job_patterns": ["redis", "redis-exporter"]
+        },
+        "jvm": {
+          "job_patterns": ["jvm", "spring", "java"]
+        },
+        "rabbitmq": {
+          "job_patterns": ["rabbitmq"]
+        }
+      }
+    }
+  ]
+}
+
+target_resolver 一般做这几步：
+
+加载目标清单 targets.json
+用 target_hint 匹配：
+id
+name
+aliases
+base_url
+IP/域名片段
+用 env 进一步过滤，比如 prod、test、dev
+用 domain 找到默认 job 过滤规则，比如 Redis 对应 redis-exporter
+组装认证 headers
+返回标准化的 Prometheus 连接信息和查询范围
+如果没匹配或匹配多个，返回错误，让 AI 追问用户
+
+为什么要单独做这个工具
+
+主要是三个原因：
+
+安全
+不能让 AI 直接访问用户输入的任意 URL，否则有 SSRF 风险。
+
+稳定
+自动巡检必须从固定目标清单里跑，不能每次靠 AI 猜 Prometheus 地址。
+
+上下文统一
+后续 Prometheus 查询、Grafana 阈值查询、报告标题都需要同一个 target 信息。
+
+
+AI做：
+从用户问题中提取 target_hint、domain、env、instance_hint
+
+Python 工具做：
+判断这个目标是否合法、唯一、可访问，返回真实配置
+
+
+
+3，关于定时巡检计划
+示例
+{
+  "target": "http://127.0.0.1:9090",
+  "domain": "redis",
+  "time_range": "24h",
+  "step": "60s",
+  "items": [
+    {
+      "id": "redis_memory_usage",
+      "name": "Redis Memory Usage",
+      "value_type": "percent",
+      "analysis_type": "threshold_trend",
+      "current_promql": "avg_over_time(redis_memory_used_bytes[5m]) / redis_memory_max_bytes * 100",
+      "range_promql": "redis_memory_used_bytes / redis_memory_max_bytes * 100",
+      "unit": "%",
+      "direction": "higher_is_bad",
+      "warning": 75,
+      "critical": 90
+    }
+  ]
+}
+AI 可以参与生成这个计划，但必须由工具校验：
+
+Prometheus 地址是否在白名单
+PromQL 是否为空
+时间范围是否过大
+step 是否合理
+指标类型是否支持
+阈值来源是否合法
+
+4，python工具
+查询prometheues ip中的
+
+
+
+
+
+
+
+
+
+
