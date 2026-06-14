@@ -585,7 +585,12 @@ todo，
 6，md文档生成
 
 
-
+{
+  "body": "{\"status\":\"success\",\"data\":[\"java_jmx\",\"node_exporter\",\"prometheus\",\"rabbitmq_exporter\",\"redis_exporter\",\"thread_pool_exporter\"]}",
+  "files": [],
+  "headers": "{\"Content-Type\": \"application/json\", \"Date\": \"Fri, 12 Jun 2026 08:34:30 GMT\", \"Content-Length\": \"129\"}",
+  "status_code": 200
+}
 
 
 
